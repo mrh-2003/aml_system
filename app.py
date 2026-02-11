@@ -4,7 +4,7 @@ import numpy as np
 import sqlite3
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, date
 import json
 from utils import *
 
@@ -286,8 +286,13 @@ elif menu == "Análisis de Patrones":
         col1, col2 = st.sidebar.columns(2)
         filtro_monto_min = col1.number_input("Monto Mínimo", min_value=0.0, value=0.0)
         filtro_monto_max = col2.number_input("Monto Máximo", min_value=0.0, value=1000000.0)
-        
-        filtro_fecha_min = st.sidebar.date_input("Fecha Mínima")
+        fecha_inicio_default = date(2016, 1, 1)
+
+        filtro_fecha_min = st.sidebar.date_input(
+            "Fecha Mínima",
+            value=fecha_inicio_default
+        )
+        #filtro_fecha_min = st.sidebar.date_input("Fecha Mínima")
         filtro_fecha_max = st.sidebar.date_input("Fecha Máxima")
         
         filtros = {
@@ -441,7 +446,7 @@ elif menu == "Análisis de Patrones":
                                title='Distribución de Montos por Tipo de Banca',
                                color='destipbanca',
                                color_discrete_sequence=px.colors.qualitative.Set2)
-                    fig.update_yaxis(type="log")
+                    fig.update_yaxes(type="log")
                     st.plotly_chart(fig, use_container_width=True)
                     
                     fig2 = px.scatter(df_alto_monto, x='fecha', y='monto',
@@ -514,7 +519,7 @@ elif menu == "Análisis de Patrones":
                            color='Num Operaciones',
                            title='Top 10 Agencias por Volumen de Efectivo',
                            color_continuous_scale='OrRd')
-                fig.update_xaxis(tickangle=-45)
+                fig.update_xaxes(tickangle=-45)
                 st.plotly_chart(fig, use_container_width=True)
                 
                 pivot_data = df_efectivo.pivot_table(
@@ -595,8 +600,8 @@ elif menu == "Análisis de Patrones":
                 
                 if not df_cajeros.empty:
                     df_cajeros['fecha_dt'] = pd.to_datetime(df_cajeros['fecha'])
-                    df_cajeros['hora_num'] = pd.to_datetime(df_cajeros['hora'], format='%H:%M:%S').dt.hour
-                    
+                    df_cajeros['hora_num'] = pd.to_datetime(df_cajeros['hora'], format='mixed', errors='coerce').dt.hour
+                    df_cajeros = df_cajeros.dropna(subset=['hora_dt'])
                     df_por_cliente_dia = df_cajeros.groupby(
                         ['codunicocli_13_enc', 'fecha_dt']
                     ).agg({
@@ -1037,10 +1042,15 @@ elif menu == "Análisis de Patrones":
                     (df_caso['canal'].isin(['CAJEROS AUTOMATICOS', 'AGENTE BCP', 'YAPE']))
                 ].copy()
                 
-                if not df_bajo_monto.empty:
+                if not df_bajo_monto.empty: 
+                    # SOLUCIÓN: Usar errors='coerce' para manejar horas inválidas como 99:99:99
                     df_bajo_monto['fecha_hora'] = pd.to_datetime(
-                        df_bajo_monto['fecha'].astype(str) + ' ' + df_bajo_monto['hora'].astype(str)
+                        df_bajo_monto['fecha'].astype(str) + ' ' + df_bajo_monto['hora'].astype(str),
+                        errors='coerce'
                     )
+                    
+                    # Eliminar registros con datos de tiempo corruptos
+                    df_bajo_monto = df_bajo_monto.dropna(subset=['fecha_hora'])
                     df_bajo_monto = df_bajo_monto.sort_values('fecha_hora')
                     
                     bursts = []

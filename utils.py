@@ -134,9 +134,19 @@ def crear_grafo_coincidencias(df, tolerancia_horas=1):
     df_egresos = df[df['i_e'] == 'Egreso'].copy()
     df_ingresos = df[df['i_e'] == 'Ingreso'].copy()
     
-    df_egresos['fecha_hora'] = pd.to_datetime(df_egresos['fecha'].astype(str) + ' ' + df_egresos['hora'].astype(str))
-    df_ingresos['fecha_hora'] = pd.to_datetime(df_ingresos['fecha'].astype(str) + ' ' + df_ingresos['hora'].astype(str))
+    df_egresos['fecha_hora'] = pd.to_datetime(
+        df_egresos['fecha'].astype(str) + ' ' + df_egresos['hora'].astype(str), 
+        errors='coerce'
+    )
+    df_ingresos['fecha_hora'] = pd.to_datetime(
+        df_ingresos['fecha'].astype(str) + ' ' + df_ingresos['hora'].astype(str), 
+        errors='coerce'
+    )
     
+    # Eliminar registros donde la conversión falló (datos corruptos en origen)
+    df_egresos = df_egresos.dropna(subset=['fecha_hora'])
+    df_ingresos = df_ingresos.dropna(subset=['fecha_hora'])
+
     coincidencias = []
     
     for _, egreso in df_egresos.iterrows():
