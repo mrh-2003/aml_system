@@ -1083,7 +1083,9 @@ elif menu == "Análisis de Patrones":
                                    use_container_width=True)
                         
                         df_timeline = df_bajo_monto.copy()
-                        df_timeline['hora_num'] = pd.to_datetime(df_timeline['hora'], format='%H:%M:%S').dt.hour
+                        #df_timeline['hora_num'] = pd.to_datetime(df_timeline['hora'], format='%H:%M:%S').dt.hour
+
+                        df_timeline['hora_num'] = df_timeline['fecha_hora'].dt.hour
                         
                         fig = px.line(df_timeline.groupby('fecha_hora').size().reset_index(),
                                     x='fecha_hora', y=0,
