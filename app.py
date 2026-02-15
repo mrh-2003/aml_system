@@ -282,6 +282,18 @@ elif menu == "Análisis de Patrones":
         
         filtro_moneda = st.sidebar.selectbox("Moneda", ["AMBOS", "SOLES", "DOLARES"])
         filtro_tipo_doc = st.sidebar.selectbox("Tipo Documento", ["AMBOS", "DNI", "RUC"])
+
+        # Obtener segmentos disponibles para el caso
+        df_segmentos = pd.read_sql_query("""
+            SELECT DISTINCT t.segmento 
+            FROM transacciones t
+            INNER JOIN caso_involucrados ci ON t.codunicocli_13_enc = ci.codunicocli_13_enc
+            WHERE ci.id_caso = ?
+            ORDER BY t.segmento
+        """, conn, params=[int(id_caso)])
+        
+        segmentos_disponibles = sorted([s for s in df_segmentos['segmento'].dropna().unique() if s])
+        filtro_segmento = st.sidebar.multiselect("Segmento", segmentos_disponibles, default=segmentos_disponibles)
         
         col1, col2 = st.sidebar.columns(2)
         filtro_monto_min = col1.number_input("Monto Mínimo", min_value=0.0, value=0.0)
@@ -298,6 +310,7 @@ elif menu == "Análisis de Patrones":
         filtros = {
             'moneda': filtro_moneda,
             'tipo_documento': filtro_tipo_doc,
+            'segmento': filtro_segmento,
             'monto_min': filtro_monto_min,
             'monto_max': filtro_monto_max,
             'fecha_min': filtro_fecha_min.strftime('%Y-%m-%d') if filtro_fecha_min else None,
@@ -322,12 +335,10 @@ elif menu == "Análisis de Patrones":
             "10. Velocidad del Dinero",
             "11. Comportamiento por Marca",
             "12. Divisa por Delito",
-            "13. Coincidencias Espejo",
-            "14. Cuentas Puente",
-            "15. Matriz Colusión Cliente-Operador",
-            "16. Explosión de Pitufeo",
-            "17. Falso Perfil Geográfico",
-            "18. Minería de Texto en Glosas"
+            "13. Cuentas Puente",
+            "14. Matriz Colusión Cliente-Operador",
+            "15. Explosión de Pitufeo",
+            "16. Minería de Texto en Glosas"
         ])
         
         agregar_reporte = False
@@ -384,41 +395,91 @@ elif menu == "Análisis de Patrones":
         elif tipo_analisis == "1. Detección de Falsos Transportistas":
             st.markdown("### 🚛 Detección de Falsos Transportistas/Constructores")
             
-            keywords = st.text_input("Keywords de búsqueda en Glosa", 
-                                    value="FERREYROS,VOLVO,SCANIA,KOMATSU,MAQUINARIA,CATERPILLAR")
+            col_kw, col_freq = st.columns([3, 1])
+            
+            with col_freq:
+                st.markdown("##### 🔝 Glosas Frecuentes")
+                # Obtener palabras frecuentes en glosas de egresos
+                df_glosas = df_caso[df_caso['i_e'] == 'Egreso']['glosa_limpia'].value_counts().reset_index()
+                df_glosas.columns = ['Glosa Completa', 'Cant']
+                st.dataframe(df_glosas, use_container_width=True, height=400)
+
+            with col_kw:
+                # Pre-calcular tokens únicos para autocompletado 
+                all_tokens = set()
+                # Usar una muestra si es muy grande para no bloquear
+                sample_glosas = df_caso[df_caso['i_e'] == 'Egreso']['glosa_limpia'].dropna().astype(str)
+                # Tokenizar para sugerencias de palabras
+                for g in sample_glosas: 
+                    all_tokens.update(g.split())
+                
+                defaults = ["FERREYROS", "VOLVO", "SCANIA", "KOMATSU", "MAQUINARIA", "CATERPILLAR"]
+                opciones_filtro = sorted(list(all_tokens.union(set(defaults))))
+                
+                keywords_sel = st.multiselect(
+                    "Keywords de búsqueda (Selecciona o escribe)", 
+                    options=opciones_filtro,
+                    default=[]
+                )
             
             if st.button("Analizar"):
-                keywords_list = [k.strip().upper() for k in keywords.split(',')]
+                keywords_list = keywords_sel
                 
-                df_filtrado = df_caso[
-                    (df_caso['act_economica'].str.contains('TRANSP|CONSTRUC', case=False, na=False)) &
-                    (df_caso['i_e'] == 'Egreso')
-                ].copy()
+                # Buscar en todos los egresos, sin filtrar por actividad económica inicial
+                df_egresos = df_caso[df_caso['i_e'] == 'Egreso'].copy()
                 
-                df_filtrado['match_keyword'] = df_filtrado['glosa_limpia'].apply(
+                # Identificar coincidencias
+                df_egresos['match_keyword'] = df_egresos['glosa_limpia'].apply(
                     lambda x: any(kw in str(x) for kw in keywords_list) if pd.notna(x) else False
                 )
                 
-                df_sospechosos = df_filtrado[df_filtrado['match_keyword']]
+                df_sospechosos = df_egresos[df_egresos['match_keyword']]
                 
                 if not df_sospechosos.empty:
-                    st.warning(f"⚠️ Se encontraron {len(df_sospechosos)} transacciones sospechosas")
+                    st.warning(f"⚠️ Se encontraron {len(df_sospechosos)} transacciones coinciden con las palabras clave")
                     
-                    df_resumen = df_sospechosos.groupby('act_economica').agg({
+                    # 1. Agrupar sospechosos por cliente
+                    df_resumen_cliente = df_sospechosos.groupby('codunicocli_13_enc').agg({
                         'monto': 'sum',
-                        'codunicocli_13_enc': 'nunique'
+                        'id_transaccion': 'count',
+                        'act_economica': 'first', # Tomamos la primera actividad registrada
+                        'glosa_limpia': lambda x: ', '.join(sorted(list(set(x)))) # Glosas únicas encontradas
                     }).reset_index()
-                    df_resumen.columns = ['Actividad Económica', 'Monto Total', 'Clientes Únicos']
+                    df_resumen_cliente.rename(columns={'monto': 'Monto en Glosas Seleccionadas', 'id_transaccion': 'Cant. Ops'}, inplace=True)
                     
-                    st.dataframe(df_resumen, use_container_width=True)
+                    # 2. Calcular promedio general de montos "normales" para estos clientes (toda su historia)
+                    clientes_sospechosos = df_resumen_cliente['codunicocli_13_enc'].unique()
+                    df_historia_clientes = df_caso[df_caso['codunicocli_13_enc'].isin(clientes_sospechosos)]
                     
-                    fig = px.bar(df_resumen, x='Actividad Económica', y='Monto Total',
-                               color='Clientes Únicos',
-                               title='Gasto en Maquinaria por Actividad Declarada',
+                    df_promedios = df_historia_clientes.groupby('codunicocli_13_enc')['monto'].mean().reset_index()
+                    df_promedios.rename(columns={'monto': 'Promedio Monto General'}, inplace=True)
+                    
+                    # 3. Cruzar información
+                    df_final = pd.merge(df_resumen_cliente, df_promedios, on='codunicocli_13_enc')
+                    
+                    # Reordenar columnas
+                    cols = ['codunicocli_13_enc', 'act_economica', 'Monto en Glosas Seleccionadas', 'Cant. Ops', 'Promedio Monto General', 'glosa_limpia']
+                    df_final = df_final[cols]
+                    df_final.columns = ['Cliente', 'Actividad Económica', 'Monto en Glosas', 'Cant. Ops', 'Promedio General', 'Glosas Encontradas']
+                    
+                    st.markdown("### 📊 Clientes y Actividades Relacionadas")
+                    st.dataframe(df_final, use_container_width=True)
+                    
+                    # Top Actividades Económicas
+                    st.markdown("### 🏭 Top Actividades Económicas Detectadas")
+                    df_top_act = df_final.groupby('Actividad Económica').agg({
+                        'Monto en Glosas': 'sum',
+                        'Cliente': 'count'
+                    }).reset_index().sort_values('Monto en Glosas', ascending=False).head(10)
+                    
+                    fig = px.bar(df_top_act, x='Actividad Económica', y='Monto en Glosas',
+                               color='Cliente',
+                               title='Total Monto por Actividad (Glosas Seleccionadas)',
+                               labels={'Cliente': 'Num Clientes'},
                                color_continuous_scale='Reds')
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    st.markdown("### Detalle de Transacciones Sospechosas")
+                    st.markdown("### 🔍 Detalle Transaccional")
                     st.dataframe(df_sospechosos[['codunicocli_13_enc', 'act_economica', 'fecha', 
                                                 'glosa_limpia', 'monto', 'moneda']].head(50))
                     
@@ -426,9 +487,13 @@ elif menu == "Análisis de Patrones":
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.download_button("📥 Exportar Excel", 
-                                         exportar_excel(df_sospechosos, "Falsos_Transportistas"),
-                                         file_name="falsos_transportistas.xlsx")
+                        st.download_button("📥 Exportar Resumen Clientes", 
+                                         exportar_excel(df_final, "Resumen_Clientes_Glosas"),
+                                         file_name="resumen_clientes_glosas.xlsx")
+                    with col2:
+                        st.download_button("📥 Exportar Detalle Transacciones", 
+                                         exportar_excel(df_sospechosos, "Detalle_Glosas"),
+                                         file_name="detalle_glosas.xlsx")
                 else:
                     st.success("No se encontraron patrones sospechosos")
         
@@ -467,32 +532,96 @@ elif menu == "Análisis de Patrones":
         elif tipo_analisis == "3. Actividad Económica vs Efectivo":
             st.markdown("### 💵 Actividad Económica vs Uso de Efectivo")
             
+            # Obtener actividades únicas
+            actividades_unicas = sorted([str(a) for a in df_caso['act_economica'].dropna().unique()])
+            
+            # Pre-seleccionar actividades que NO son mineras por defecto
+            actividades_default = [a for a in actividades_unicas if 'MINERA' not in a.upper() and 'MINERIA' not in a.upper()]
+            
+            actividades_sel = st.multiselect(
+                "Filtrar Actividades Económicas (Por defecto excluye Minería)",
+                actividades_unicas,
+                default=actividades_default
+            )
+            
             if st.button("Analizar"):
-                df_efectivo = df_caso[df_caso['grupo'].isin(['RETIRO', 'DEPOSITO', 'DISP EFECTIVO'])]
-                
-                df_por_actividad = df_caso.groupby('act_economica').agg({
-                    'monto': 'sum',
-                    'id_transaccion': 'count'
-                }).reset_index()
-                df_por_actividad.columns = ['Actividad', 'Monto Total', 'Total Ops']
-                
-                df_efectivo_act = df_efectivo.groupby('act_economica').agg({
-                    'monto': 'sum',
-                    'id_transaccion': 'count'
-                }).reset_index()
-                df_efectivo_act.columns = ['Actividad', 'Monto Efectivo', 'Ops Efectivo']
-                
-                df_merged = pd.merge(df_por_actividad, df_efectivo_act, on='Actividad', how='left').fillna(0)
-                df_merged['% Efectivo'] = (df_merged['Monto Efectivo'] / df_merged['Monto Total'] * 100).round(2)
-                df_merged = df_merged.sort_values('% Efectivo', ascending=False)
-                
-                st.dataframe(df_merged, use_container_width=True)
-                
-                fig = px.bar(df_merged, x='Actividad', y=['Monto Efectivo', 'Monto Total'],
-                           title='Comparación Efectivo vs Total por Actividad Económica',
-                           barmode='group',
-                           color_discrete_sequence=['#FF6B6B', '#4ECDC4'])
-                st.plotly_chart(fig, use_container_width=True)
+                if actividades_sel:
+                    df_filtrado = df_caso[df_caso['act_economica'].isin(actividades_sel)]
+                    
+                    st.markdown(f"### 📊 Análisis para {len(actividades_sel)} actividades seleccionadas")
+                    
+                    # Ranking por Tipo de Operación (Grupo)
+                    df_ranking_grupo = df_filtrado.groupby('grupo').agg({
+                        'id_transaccion': 'count',
+                        'monto': 'sum'
+                    }).reset_index()
+                    
+                    df_ranking_grupo.columns = ['Tipo Operación', 'Cantidad Operaciones', 'Monto Total']
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("#### Top por Monto")
+                        df_monto = df_ranking_grupo.sort_values('Monto Total', ascending=False).head(10)
+                        st.dataframe(df_monto[['Tipo Operación', 'Monto Total']], use_container_width=True)
+                        fig_monto = px.bar(df_monto, x='Tipo Operación', y='Monto Total',
+                                         title='Top Operaciones por Monto',
+                                         color='Monto Total', color_continuous_scale='Viridis')
+                        st.plotly_chart(fig_monto, use_container_width=True)
+                        
+                    with col2:
+                        st.markdown("#### Top por Cantidad")
+                        df_cantidad = df_ranking_grupo.sort_values('Cantidad Operaciones', ascending=False).head(10)
+                        st.dataframe(df_cantidad[['Tipo Operación', 'Cantidad Operaciones']], use_container_width=True)
+                        fig_cant = px.bar(df_cantidad, x='Tipo Operación', y='Cantidad Operaciones',
+                                        title='Top Operaciones por Frecuencia',
+                                        color='Cantidad Operaciones', color_continuous_scale='Magma')
+                        st.plotly_chart(fig_cant, use_container_width=True)
+
+                    # Tabla Resumen Original (Opcional, pero útil)
+                    st.markdown("---")
+                    st.markdown("### 📋 Desglose por Actividad Económica")
+                    
+                    df_resumen_act = df_filtrado.groupby(['act_economica', 'grupo', 'i_e']).agg({
+                         'monto': 'sum',
+                         'id_transaccion': 'count'
+                    }).reset_index()
+                    st.dataframe(df_resumen_act, use_container_width=True)
+                    
+                    df_merged = df_ranking_grupo # Para exportar el general
+                    
+                    st.markdown("---")
+                    st.markdown("### 💵 Porcentaje de Uso de Efectivo vs Total")
+                    
+                    # Calcular % de Efectivo para las actividades seleccionadas
+                    df_efectivo_filtrado = df_filtrado[df_filtrado['grupo'].isin(['RETIRO', 'DEPOSITO', 'DISP EFECTIVO'])]
+                    
+                    df_por_actividad = df_filtrado.groupby('act_economica').agg({
+                        'monto': 'sum',
+                        'id_transaccion': 'count'
+                    }).reset_index()
+                    df_por_actividad.columns = ['Actividad', 'Monto Total', 'Total Ops']
+                    
+                    df_efectivo_act = df_efectivo_filtrado.groupby('act_economica').agg({
+                        'monto': 'sum',
+                        'id_transaccion': 'count'
+                    }).reset_index()
+                    df_efectivo_act.columns = ['Actividad', 'Monto Efectivo', 'Ops Efectivo']
+                    
+                    df_comparativo = pd.merge(df_por_actividad, df_efectivo_act, on='Actividad', how='left').fillna(0)
+                    df_comparativo['% Efectivo'] = (df_comparativo['Monto Efectivo'] / df_comparativo['Monto Total'] * 100).round(2)
+                    df_comparativo = df_comparativo.sort_values('% Efectivo', ascending=False)
+                    
+                    st.dataframe(df_comparativo, use_container_width=True)
+                    
+                    fig_comp = px.bar(df_comparativo, x='Actividad', y=['Monto Efectivo', 'Monto Total'],
+                               title='Comparación Efectivo vs Total por Actividad Económica',
+                               barmode='group',
+                               color_discrete_sequence=['#FF6B6B', '#4ECDC4'])
+                    st.plotly_chart(fig_comp, use_container_width=True)
+                else:
+                    st.warning("Seleccione al menos una actividad económica")
+                    df_merged = pd.DataFrame() # Empty for export check logic filter
                 
                 agregar_reporte = st.checkbox("✅ Incluir en reporte PDF")
                 
@@ -522,13 +651,17 @@ elif menu == "Análisis de Patrones":
                 fig.update_xaxes(tickangle=-45)
                 st.plotly_chart(fig, use_container_width=True)
                 
-                pivot_data = df_efectivo.pivot_table(
+                # Filtrar data para el heatmap usando solo las Top Agencias
+                top_agencias_list = df_agencias['Agencia'].tolist()
+                df_efectivo_top = df_efectivo[df_efectivo['agencia'].isin(top_agencias_list)]
+                
+                pivot_data = df_efectivo_top.pivot_table(
                     values='monto',
                     index='agencia',
                     columns='grupo',
                     aggfunc='sum',
                     fill_value=0
-                ).head(15)
+                )
                 
                 fig2 = px.imshow(pivot_data,
                                title='Heatmap: Efectivo por Agencia y Tipo',
@@ -545,15 +678,45 @@ elif menu == "Análisis de Patrones":
         elif tipo_analisis == "5. Pitufeo Digital (Yape/Plin)":
             st.markdown("### 📱 Detección de Pitufeo Digital")
             
+            tipo_billetera = st.radio("Seleccionar Billetera Digital", ["AMBOS", "YAPE", "PLIN"], horizontal=True)
             monto_max_pitufeo = st.slider("Monto máximo por operación", 0, 1000, 500)
             
             if st.button("Analizar"):
+                if tipo_billetera == "AMBOS":
+                    grupos_busqueda = ['YAPE', 'PLIN']
+                else:
+                    grupos_busqueda = [tipo_billetera]
+
                 df_digital = df_caso[
-                    (df_caso['grupo'].isin(['YAPE', 'PLIN'])) &
+                    (df_caso['grupo'].isin(grupos_busqueda)) &
                     (df_caso['monto'] < monto_max_pitufeo)
                 ]
                 
                 if not df_digital.empty:
+                    if tipo_billetera == "AMBOS":
+                        total_ops = len(df_digital)
+                        counts = df_digital['grupo'].value_counts()
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        yape_count = counts.get('YAPE', 0)
+                        plin_count = counts.get('PLIN', 0)
+                        
+                        yape_pct = (yape_count / total_ops) * 100 if total_ops > 0 else 0
+                        plin_pct = (plin_count / total_ops) * 100 if total_ops > 0 else 0
+                        
+                        col1.metric("YAPE", f"{yape_pct:.1f}%", f"{yape_count} ops")
+                        col2.metric("PLIN", f"{plin_pct:.1f}%", f"{plin_count} ops")
+                        
+                        fig_pie = px.pie(df_digital, names='grupo', title='Distribución YAPE vs PLIN',
+                                       color='grupo',
+                                       color_discrete_map={'YAPE': '#7D3C98', 'PLIN': '#3498DB'})
+                        st.plotly_chart(fig_pie, use_container_width=True)
+                    else:
+                        col1, col2 = st.columns(2)
+                        col1.metric(f"Total Ops {tipo_billetera}", f"{len(df_digital)}")
+                        col2.metric(f"Monto Total {tipo_billetera}", f"S/ {df_digital['monto'].sum():,.2f}")
+
                     df_por_cliente = df_digital.groupby('codunicocli_13_enc').agg({
                         'id_transaccion': 'count',
                         'monto': 'sum'
@@ -561,12 +724,14 @@ elif menu == "Análisis de Patrones":
                     df_por_cliente.columns = ['Cliente', 'Num Operaciones', 'Monto Total']
                     df_por_cliente = df_por_cliente.sort_values('Num Operaciones', ascending=False)
                     
+                    st.markdown("### Top Clientes por Frecuencia")
+                    st.dataframe(df_por_cliente.head(50), use_container_width=True)
+
                     sospechosos = df_por_cliente[df_por_cliente['Num Operaciones'] > 50]
                     
                     if not sospechosos.empty:
                         st.warning(f"⚠️ {len(sospechosos)} clientes con más de 50 micropagos")
-                        st.dataframe(sospechosos.head(20), use_container_width=True)
-                    
+
                     df_digital['fecha_dt'] = pd.to_datetime(df_digital['fecha'])
                     df_diario = df_digital.groupby('fecha_dt').size().reset_index()
                     df_diario.columns = ['Fecha', 'Cantidad']
@@ -592,7 +757,14 @@ elif menu == "Análisis de Patrones":
         elif tipo_analisis == "6. Retiros Hormiga en Cajeros":
             st.markdown("### 🏧 Patrón de Retiros Hormiga")
             
+            # Inicializar estado si no existe
+            if 'analisis_retiros_activo' not in st.session_state:
+                st.session_state.analisis_retiros_activo = False
+
             if st.button("Analizar"):
+                st.session_state.analisis_retiros_activo = True
+            
+            if st.session_state.analisis_retiros_activo:
                 df_cajeros = df_caso[
                     (df_caso['canal'] == 'CAJEROS AUTOMATICOS') &
                     (df_caso['i_e'] == 'Egreso')
@@ -601,7 +773,7 @@ elif menu == "Análisis de Patrones":
                 if not df_cajeros.empty:
                     df_cajeros['fecha_dt'] = pd.to_datetime(df_cajeros['fecha'])
                     df_cajeros['hora_num'] = pd.to_datetime(df_cajeros['hora'], format='mixed', errors='coerce').dt.hour
-                    df_cajeros = df_cajeros.dropna(subset=['hora_dt'])
+                    df_cajeros = df_cajeros.dropna(subset=['hora_num'])
                     df_por_cliente_dia = df_cajeros.groupby(
                         ['codunicocli_13_enc', 'fecha_dt']
                     ).agg({
@@ -623,6 +795,62 @@ elif menu == "Análisis de Patrones":
                                        color_continuous_scale='Reds')
                         st.plotly_chart(fig, use_container_width=True)
                         
+                        st.markdown("---")
+                        col_cajero, col_operador = st.columns(2)
+                        
+                        with col_cajero:
+                            st.markdown("### 🏧 Top Cajeros")
+                            # Top Cajeros (CodAgencia/Agencia)
+                            df_top_cajeros = df_cajeros.groupby('agencia').agg({
+                                'id_transaccion': 'count',
+                                'monto': 'sum',
+                                'grupo': lambda x: ', '.join(sorted(x.astype(str).unique()))
+                            }).reset_index().sort_values('id_transaccion', ascending=False).head(10)
+                            
+                            df_top_cajeros.columns = ['Agencia', 'Num Operaciones', 'Monto Total', 'Tipos Operación']
+                            st.dataframe(df_top_cajeros, use_container_width=True)
+                            
+                            cajeros_list = df_top_cajeros['Agencia'].tolist()
+                            cajero_sel = st.selectbox("Seleccionar Cajero", cajeros_list)
+                            
+                            if cajero_sel:
+                                df_cajero_ops = df_cajeros[df_cajeros['agencia'] == cajero_sel].groupby('grupo').agg({
+                                    'id_transaccion': 'count'
+                                }).reset_index().sort_values('id_transaccion', ascending=False)
+                                
+                                fig_cajero = px.bar(df_cajero_ops, x='grupo', y='id_transaccion',
+                                                  title=f'Operaciones en {cajero_sel}',
+                                                  labels={'grupo': 'Tipo Operación', 'id_transaccion': 'Cantidad'})
+                                st.plotly_chart(fig_cajero, use_container_width=True)
+
+                        with col_operador:
+                            st.markdown("### 👤 Top Operadores")
+                            # Top Operadores
+                            df_top_operadores = df_cajeros.groupby('operador').agg({
+                                'id_transaccion': 'count',
+                                'monto': 'sum',
+                                'grupo': lambda x: ', '.join(sorted(x.astype(str).unique()))
+                            }).reset_index().sort_values('id_transaccion', ascending=False).head(10)
+                            
+                            df_top_operadores.columns = ['Operador', 'Num Operaciones', 'Monto Total', 'Tipos Operación']
+                            st.dataframe(df_top_operadores, use_container_width=True)
+                            
+                            operadores_list = df_top_operadores['Operador'].tolist()
+                            operador_sel = st.selectbox("Seleccionar Operador", operadores_list)
+                            
+                            if operador_sel:
+                                df_operador_ops = df_cajeros[df_cajeros['operador'] == operador_sel].groupby('grupo').agg({
+                                    'id_transaccion': 'count'
+                                }).reset_index().sort_values('id_transaccion', ascending=False)
+                                
+                                fig_operador = px.bar(df_operador_ops, x='grupo', y='id_transaccion',
+                                                    title=f'Operaciones de {operador_sel}',
+                                                    labels={'grupo': 'Tipo Operación', 'id_transaccion': 'Cantidad'},
+                                                    color_discrete_sequence=['#FF9F43'])
+                                st.plotly_chart(fig_operador, use_container_width=True)
+                        
+                        st.markdown("---")
+                        
                         agregar_reporte = st.checkbox("✅ Incluir en reporte PDF")
                         
                         st.download_button("📥 Exportar Excel", 
@@ -636,7 +864,14 @@ elif menu == "Análisis de Patrones":
         elif tipo_analisis == "7. Preferencia por Operador":
             st.markdown("### 👤 Análisis de Preferencia por Operador")
             
+            # Inicializar estado si no existe
+            if 'analisis_operador_activo' not in st.session_state:
+                st.session_state.analisis_operador_activo = False
+
             if st.button("Analizar"):
+                st.session_state.analisis_operador_activo = True
+
+            if st.session_state.analisis_operador_activo:
                 df_ventanilla = df_caso[
                     (df_caso['canal'] == 'VENTANILLA') &
                     (df_caso['operador'].notna())
@@ -660,16 +895,32 @@ elif menu == "Análisis de Patrones":
                                       aspect='auto')
                         st.plotly_chart(fig, use_container_width=True)
                     
+                    criterio_top = st.radio("Ordenar Top por:", ["Monto Total", "Cantidad de Operaciones", "Clientes Únicos"], horizontal=True)
+
                     df_ops_operador = df_ventanilla.groupby('operador').agg({
                         'codunicocli_13_enc': 'nunique',
-                        'id_transaccion': 'count'
+                        'id_transaccion': 'count',
+                        'monto': 'sum'
                     }).reset_index()
-                    df_ops_operador.columns = ['Operador', 'Clientes Únicos', 'Total Operaciones']
-                    df_ops_operador = df_ops_operador.sort_values('Clientes Únicos', ascending=False).head(15)
+                    df_ops_operador.columns = ['Operador', 'Clientes Únicos', 'Total Operaciones', 'Monto Total']
                     
-                    fig2 = px.bar(df_ops_operador, x='Operador', y='Clientes Únicos',
-                                color='Total Operaciones',
-                                title='Top Operadores por Número de Clientes Investigados',
+                    if criterio_top == "Monto Total":
+                        columna_orden = 'Monto Total'
+                        color_col = 'Total Operaciones'
+                    elif criterio_top == "Cantidad de Operaciones":
+                        columna_orden = 'Total Operaciones'
+                        color_col = 'Monto Total'
+                    else:
+                        columna_orden = 'Clientes Únicos'
+                        color_col = 'Total Operaciones'
+
+                    df_ops_operador = df_ops_operador.sort_values(columna_orden, ascending=False).head(15)
+                    
+                    st.dataframe(df_ops_operador, use_container_width=True)
+
+                    fig2 = px.bar(df_ops_operador, x='Operador', y=columna_orden,
+                                color=color_col,
+                                title=f'Top Operadores por {criterio_top}',
                                 color_continuous_scale='YlOrRd')
                     st.plotly_chart(fig2, use_container_width=True)
                     
@@ -747,18 +998,38 @@ elif menu == "Análisis de Patrones":
             meses_max = st.slider("Duración máxima de cuenta (meses)", 1, 12, 6)
             
             if st.button("Analizar"):
+
+                # Convertir fechas antes de agrupar para evitar errores de tipo
+                df_caso['fecapertura'] = pd.to_datetime(df_caso['fecapertura'], errors='coerce')
+                df_caso['feccierre'] = pd.to_datetime(df_caso['feccierre'], errors='coerce')
+
+                # Agregación inicial para obtener fechas y cuenta
                 df_cuentas = df_caso.groupby('codunicocli_13_enc').agg({
-                    'fecapertura': 'first',
-                    'feccierre': 'first',
+                    'fecapertura': 'max',
+                    'feccierre': 'max',
+                    'ctacomercial': 'first', # Asumimos una cuenta principal por cliente en este contexto
                     'monto': 'sum'
                 }).reset_index()
                 
-                df_cuentas['fecapertura'] = pd.to_datetime(df_cuentas['fecapertura'])
-                df_cuentas['feccierre'] = pd.to_datetime(df_cuentas['feccierre'])
+                # Obtener Monto Apertura (Primer movimiento) y Glosas Principales
+                # Para esto necesitamos ordenar las transacciones por fecha
+                df_sorted = df_caso.sort_values('fecha')
+                df_detalles = df_sorted.groupby('codunicocli_13_enc').agg({
+                    'monto': 'first', # Monto de apertura aproximado (primer movimiento)
+                    'glosa': lambda x: ', '.join(x.value_counts().head(3).index.astype(str))
+                }).rename(columns={'monto': 'monto_apertura', 'glosa': 'top_glosas'})
+                
+                df_cuentas = pd.merge(df_cuentas, df_detalles, on='codunicocli_13_enc')
+
+                df_cuentas['fecapertura'] = pd.to_datetime(df_cuentas['fecapertura'], errors='coerce')
+                df_cuentas['feccierre'] = pd.to_datetime(df_cuentas['feccierre'], errors='coerce')
                 
                 df_cerradas = df_cuentas[df_cuentas['feccierre'].notna()].copy()
                 
                 if not df_cerradas.empty:
+                    # Corrección: Eliminar fechas inconsistentes
+                    df_cerradas = df_cerradas[df_cerradas['feccierre'] >= df_cerradas['fecapertura']]
+                    
                     df_cerradas['duracion_dias'] = (df_cerradas['feccierre'] - df_cerradas['fecapertura']).dt.days
                     df_cerradas['duracion_meses'] = df_cerradas['duracion_dias'] / 30
                     
@@ -767,15 +1038,18 @@ elif menu == "Análisis de Patrones":
                     if not df_sospechosas.empty:
                         st.warning(f"⚠️ {len(df_sospechosas)} cuentas cerradas en menos de {meses_max} meses")
                         
-                        df_display = df_sospechosas[['codunicocli_13_enc', 'fecapertura', 'feccierre', 
-                                                    'duracion_meses', 'monto']].copy()
-                        df_display.columns = ['Cliente', 'Apertura', 'Cierre', 'Duración (meses)', 'Monto Total']
-                        df_display = df_display.sort_values('Monto Total', ascending=False)
+                        df_display = df_sospechosas[['codunicocli_13_enc', 'ctacomercial', 'fecapertura', 'feccierre', 
+                                                    'monto_apertura', 'monto', 'top_glosas', 'duracion_meses']].copy()
+                        df_display.columns = ['Cliente', 'Cuenta', 'Apertura', 'Cierre', 
+                                            'Monto 1er Mov', 'Monto Total Movido', 'Principales Operaciones', 'Duración (meses)']
+                        
+                        df_display = df_display.sort_values('Monto Total Movido', ascending=False)
                         
                         st.dataframe(df_display, use_container_width=True)
                         
                         fig = px.scatter(df_sospechosas, x='duracion_meses', y='monto',
                                        size='monto',
+                                       hover_data=['ctacomercial', 'top_glosas'],
                                        title='Relación Duración vs Monto Movido',
                                        labels={'duracion_meses': 'Duración (meses)', 'monto': 'Monto Total'},
                                        color_discrete_sequence=['#E74C3C'])
@@ -821,7 +1095,25 @@ elif menu == "Análisis de Patrones":
                     if not df_sospechoso.empty:
                         st.warning(f"⚠️ {len(df_sospechoso)} días con patrón de paso rápido de dinero")
                         
-                        st.dataframe(df_sospechoso.head(20), use_container_width=True)
+                        st.dataframe(df_sospechoso, use_container_width=True)
+                        
+                        st.markdown("### 🏆 Top 10 Clientes con Mayor Frecuencia")
+                        
+                        df_top_velocidad = df_sospechoso.groupby('codunicocli_13_enc').agg({
+                            'fecha_dt': 'count',
+                            'Ingreso': 'sum'
+                        }).reset_index()
+                        
+                        df_top_velocidad.columns = ['Cliente', 'Días con Patrón', 'Monto Total Ingresado']
+                        df_top_velocidad = df_top_velocidad.sort_values('Días con Patrón', ascending=False).head(10)
+                        
+                        st.dataframe(df_top_velocidad, use_container_width=True)
+                        
+                        fig_top = px.bar(df_top_velocidad, x='Cliente', y='Días con Patrón',
+                                       title='Top 10 Clientes por Frecuencia de "Pass-Through"',
+                                       color='Monto Total Ingresado',
+                                       color_continuous_scale='Reds')
+                        st.plotly_chart(fig_top, use_container_width=True)
                         
                         for cliente in df_sospechoso['codunicocli_13_enc'].unique()[:3]:
                             df_cliente = df_pivot[df_pivot['codunicocli_13_enc'] == cliente].sort_values('fecha_dt')
@@ -850,29 +1142,89 @@ elif menu == "Análisis de Patrones":
         elif tipo_analisis == "11. Comportamiento por Marca":
             st.markdown("### 🏷️ Comportamiento Diferenciado por Marca")
             
+            # 1. Filtro afuera
+            marcas_disponibles = ['TODAS'] + sorted([str(m) for m in df_caso['tipo_marca'].dropna().unique()])
+            marca_seleccionada = st.selectbox("Filtrar por Tipo de Marca", marcas_disponibles)
+
             if st.button("Analizar"):
-                df_por_marca = df_caso.groupby(['tipo_marca', 'grupo']).agg({
+                # 2. Porcentaje del total de operaciones de toda la muestra por cada tipo de marca
+                total_ops_global = len(df_caso)
+                total_monto_global = df_caso['monto'].sum()
+                
+                df_resumen_marcas = df_caso.groupby('tipo_marca').agg({
+                    'id_transaccion': 'count',
+                    'monto': 'sum'
+                }).reset_index()
+                
+                df_resumen_marcas['% Operaciones'] = (df_resumen_marcas['id_transaccion'] / total_ops_global) * 100
+                df_resumen_marcas['% Monto'] = (df_resumen_marcas['monto'] / total_monto_global) * 100
+                
+                st.markdown("#### 📊 Distribución Global por Marca")
+                
+                # Display metrics summary
+                df_display_resumen = df_resumen_marcas.copy()
+                df_display_resumen['% Operaciones'] = df_display_resumen['% Operaciones'].map('{:.2f}%'.format)
+                df_display_resumen['% Monto'] = df_display_resumen['% Monto'].map('{:.2f}%'.format)
+                df_display_resumen = df_display_resumen.sort_values('% Operaciones', ascending=False)
+                
+                st.dataframe(df_display_resumen, use_container_width=True)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    fig_pie_ops = px.pie(df_resumen_marcas, values='id_transaccion', names='tipo_marca', 
+                                       title='Distribución por Cantidad de Ops')
+                    st.plotly_chart(fig_pie_ops, use_container_width=True)
+                with col2:
+                    fig_pie_monto = px.pie(df_resumen_marcas, values='monto', names='tipo_marca', 
+                                         title='Distribución por Monto')
+                    st.plotly_chart(fig_pie_monto, use_container_width=True)
+
+                st.markdown("---")
+                
+                # Filter for detailed analysis
+                if marca_seleccionada != 'TODAS':
+                    df_analisis = df_caso[df_caso['tipo_marca'] == marca_seleccionada]
+                    st.markdown(f"#### Detalle para: {marca_seleccionada}")
+                else:
+                    df_analisis = df_caso
+                    st.markdown("#### Detalle Global")
+
+                # Existing Detailed Analysis (breakdown by Group)
+                df_por_marca_grupo = df_analisis.groupby(['tipo_marca', 'grupo']).agg({
                     'monto': 'sum',
                     'id_transaccion': 'count'
                 }).reset_index()
                 
-                st.dataframe(df_por_marca, use_container_width=True)
+                st.dataframe(df_por_marca_grupo, use_container_width=True)
                 
-                fig = px.bar(df_por_marca, x='tipo_marca', y='monto',
-                           color='grupo',
-                           title='Distribución de Operaciones por Tipo de Marca',
-                           barmode='stack')
+                if marca_seleccionada == 'TODAS':
+                    fig = px.bar(df_por_marca_grupo, x='tipo_marca', y='monto',
+                               color='grupo',
+                               title='Distribución de Operaciones por Tipo de Marca y Grupo',
+                               barmode='stack')
+                    
+                    fig2 = px.sunburst(df_por_marca_grupo, path=['tipo_marca', 'grupo'],
+                                     values='monto',
+                                     title='Composición de Operaciones por Marca')
+                else:
+                    # Filtrar Top 10 para mejor visualización
+                    df_top10_grupo = df_por_marca_grupo.sort_values('monto', ascending=False).head(10)
+                    
+                    fig = px.bar(df_top10_grupo, x='grupo', y='monto',
+                               title=f'Top 10: Distribución de Operaciones por Grupo ({marca_seleccionada})',
+                               labels={'grupo': 'Tipo de Operación', 'monto': 'Monto Total'},
+                               color='grupo')
+                    
+                    fig2 = px.pie(df_top10_grupo, names='grupo', values='monto',
+                                title=f'Top 10: Composición de Operaciones por Grupo ({marca_seleccionada})')
+                
                 st.plotly_chart(fig, use_container_width=True)
-                
-                fig2 = px.sunburst(df_por_marca, path=['tipo_marca', 'grupo'],
-                                 values='monto',
-                                 title='Composición de Operaciones por Marca')
                 st.plotly_chart(fig2, use_container_width=True)
                 
                 agregar_reporte = st.checkbox("✅ Incluir en reporte PDF")
                 
                 st.download_button("📥 Exportar Excel", 
-                                 exportar_excel(df_por_marca, "Comportamiento_Marca"),
+                                 exportar_excel(df_por_marca_grupo, "Comportamiento_Marca"),
                                  file_name="comportamiento_marca.xlsx")
         
         elif tipo_analisis == "12. Divisa por Delito":
@@ -907,32 +1259,8 @@ elif menu == "Análisis de Patrones":
                 else:
                     st.info("No hay datos de delitos")
         
-        elif tipo_analisis == "13. Coincidencias Espejo":
-            st.markdown("### 🔄 Grafo de Coincidencias Espejo")
-            
-            tolerancia = st.slider("Tolerancia de tiempo (horas)", 1, 24, 1)
-            
-            if st.button("Generar Grafo"):
-                with st.spinner("Analizando coincidencias..."):
-                    fig, df_coincidencias = crear_grafo_coincidencias(df_caso, tolerancia)
-                    
-                    if fig is not None:
-                        st.warning(f"⚠️ Se encontraron {len(df_coincidencias)} coincidencias de montos")
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        st.markdown("### Detalle de Coincidencias")
-                        st.dataframe(df_coincidencias.head(50), use_container_width=True)
-                        
-                        agregar_reporte = st.checkbox("✅ Incluir en reporte PDF")
-                        
-                        st.download_button("📥 Exportar Excel", 
-                                         exportar_excel(df_coincidencias, "Coincidencias"),
-                                         file_name="coincidencias_espejo.xlsx")
-                    else:
-                        st.success("No se encontraron coincidencias espejo")
-        
-        elif tipo_analisis == "14. Cuentas Puente":
+
+        elif tipo_analisis == "13. Cuentas Puente":
             st.markdown("### 🌉 Detección de Cuentas Puente")
             
             if st.button("Analizar"):
@@ -940,12 +1268,12 @@ elif menu == "Análisis de Patrones":
                 
                 df_filtrado = df_caso[df_caso['grupo'].isin(['TRANSFERENCIA', 'TT OTRA CTA', 'CHEQUE'])]
                 
-                df_diario = df_filtrado.groupby(['codunicocli_13_enc', 'fecha_dt', 'i_e']).agg({
+                df_diario = df_filtrado.groupby(['codunicocli_13_enc', 'act_economica', 'fecha_dt', 'i_e']).agg({
                     'monto': 'sum'
                 }).reset_index()
                 
                 df_pivot = df_diario.pivot_table(
-                    index=['codunicocli_13_enc', 'fecha_dt'],
+                    index=['codunicocli_13_enc', 'act_economica', 'fecha_dt'],
                     columns='i_e',
                     values='monto',
                     fill_value=0
@@ -955,6 +1283,7 @@ elif menu == "Análisis de Patrones":
                     df_pivot['saldo_diario'] = df_pivot['Ingreso'] - df_pivot['Egreso']
                     df_pivot['volumen_diario'] = df_pivot['Ingreso'] + df_pivot['Egreso']
                     
+                    # Filtrar cuentas puente: alto volumen pero el saldo final del día es casi 0
                     df_puente = df_pivot[
                         (abs(df_pivot['saldo_diario']) < 100) &
                         (df_pivot['volumen_diario'] > 5000)
@@ -962,19 +1291,47 @@ elif menu == "Análisis de Patrones":
                     
                     if not df_puente.empty:
                         st.warning(f"⚠️ {len(df_puente)} días con patrón de cuenta puente")
+                         
                         
                         st.dataframe(df_puente.head(20), use_container_width=True)
                         
-                        for cliente in df_puente['codunicocli_13_enc'].unique()[:3]:
-                            df_cliente = df_pivot[df_pivot['codunicocli_13_enc'] == cliente]
-                            
-                            fig = px.scatter(df_cliente, x='fecha_dt', y='volumen_diario',
-                                           size='volumen_diario',
-                                           color=abs(df_cliente['saldo_diario']),
-                                           title=f'Patrón de Cuenta Puente - Cliente {cliente[:8]}',
-                                           labels={'volumen_diario': 'Volumen', 'fecha_dt': 'Fecha'},
-                                           color_continuous_scale='Reds')
-                            st.plotly_chart(fig, use_container_width=True)
+                        # 1. Top Actividades Económicas
+                        st.markdown("### 🏭 Top Actividades Económicas Involucradas")
+                        df_top_actividades = df_puente.groupby('act_economica').agg({
+                            'codunicocli_13_enc': 'nunique',
+                            'volumen_diario': 'sum',
+                            'fecha_dt': 'count'
+                        }).reset_index()
+                        
+                        df_top_actividades.columns = ['Actividad', 'Clientes Únicos', 'Volumen Total', 'Días con Patrón']
+                        df_top_actividades = df_top_actividades.sort_values('Volumen Total', ascending=False).head(10)
+                        
+                        fig_act = px.bar(df_top_actividades, x='Actividad', y='Volumen Total',
+                                       color='Clientes Únicos',
+                                       title='Top 10 Actividades por Volumen en Cuentas Puente',
+                                       text_auto='.2s',
+                                       color_continuous_scale='Viridis')
+                        st.plotly_chart(fig_act, use_container_width=True)
+
+                        # 2. Top Clientes
+                        st.markdown("### 🏆 Top Clientes Identificados")
+                        df_top_clientes = df_puente.groupby('codunicocli_13_enc').agg({
+                            'volumen_diario': 'sum',
+                            'fecha_dt': 'count',
+                            'act_economica': 'first'
+                        }).reset_index()
+                        
+                        df_top_clientes.columns = ['Cliente', 'Volumen Total', 'Días Detectados', 'Actividad']
+                        df_top_clientes = df_top_clientes.sort_values('Días Detectados', ascending=False).head(10)
+                        
+                        fig_cli = px.bar(df_top_clientes, y='Cliente', x='Días Detectados',
+                                       orientation='h',
+                                       color='Volumen Total',
+                                       title='Top 10 Clientes por Frecuencia de Patrón',
+                                       text='Actividad',
+                                       color_continuous_scale='Reds')
+                        st.plotly_chart(fig_cli, use_container_width=True)
+
                         
                         agregar_reporte = st.checkbox("✅ Incluir en reporte PDF")
                         
@@ -986,7 +1343,7 @@ elif menu == "Análisis de Patrones":
                 else:
                     st.info("No hay suficientes datos")
         
-        elif tipo_analisis == "15. Matriz Colusión Cliente-Operador":
+        elif tipo_analisis == "14. Matriz Colusión Cliente-Operador":
             st.markdown("### 🔗 Matriz de Colusión Cliente-Operador")
             
             if st.button("Generar Matriz"):
@@ -996,41 +1353,48 @@ elif menu == "Análisis de Patrones":
                 ]
                 
                 if not df_efectivo.empty:
+
                     df_operador_cliente = df_efectivo.groupby(['operador', 'codunicocli_13_enc']).agg({
                         'id_transaccion': 'count',
                         'monto': 'sum'
                     }).reset_index()
                     df_operador_cliente.columns = ['Operador', 'Cliente', 'Operaciones', 'Monto Total']
+                    df_operador_cliente['Operador'] = df_operador_cliente['Operador'].astype(str)
                     
-                    pivot = df_operador_cliente.pivot_table(
-                        index='Cliente',
-                        columns='Operador',
-                        values='Operaciones',
-                        fill_value=0
-                    )
+                    st.markdown("### Top Clientes y sus Operadores Favoritos")
                     
-                    if pivot.shape[0] > 0 and pivot.shape[1] > 0:
-                        fig = px.imshow(pivot,
-                                      title='Heatmap: Cliente vs Operador (Número de Operaciones)',
-                                      color_continuous_scale='YlOrRd',
-                                      aspect='auto')
+                    metric_op = st.radio("Metrica para gráficos:", ["Cantidad de Operaciones", "Monto Total"], horizontal=True)
+                    col_metric = 'Operaciones' if metric_op == "Cantidad de Operaciones" else 'Monto Total'
+
+                    # Obtener Top Clientes con más interacciones
+                    top_clientes = df_operador_cliente.groupby('Cliente')[col_metric].sum().sort_values(ascending=False).head(10).index.tolist()
+                    
+                    st.info(f"Mostrando Top 10 Clientes con mayor {metric_op}")
+                    
+                    for cliente in top_clientes:
+                        df_cli = df_operador_cliente[df_operador_cliente['Cliente'] == cliente].copy()
+                        df_cli = df_cli.sort_values(col_metric, ascending=False).head(10)
+                        
+                        fig = px.bar(df_cli, x='Operador', y=col_metric,
+                                   title=f'Top 10 Operadores para Cliente {cliente[:10]}...',
+                                   color=col_metric,
+                                   labels={'Operador': 'Código Operador'},
+                                   color_continuous_scale='Viridis' if metric_op == "Cantidad de Operaciones" else 'Sunset')
+                        fig.update_xaxes(type='category')
                         st.plotly_chart(fig, use_container_width=True)
-                        
-                        st.markdown("### Top Relaciones Cliente-Operador")
-                        df_top = df_operador_cliente.sort_values('Operaciones', ascending=False).head(20)
-                        st.dataframe(df_top, use_container_width=True)
-                        
-                        agregar_reporte = st.checkbox("✅ Incluir en reporte PDF")
-                        
-                        st.download_button("📥 Exportar Excel", 
-                                         exportar_excel(df_top, "Matriz_Colusion"),
-                                         file_name="matriz_colusion.xlsx")
-                    else:
-                        st.info("No hay suficientes datos para crear matriz")
+                    
+                    st.markdown("### Detalle Completo")
+                    st.dataframe(df_operador_cliente.sort_values(col_metric, ascending=False).head(50), use_container_width=True)
+                    
+                    agregar_reporte = st.checkbox("✅ Incluir en reporte PDF")
+                    
+                    st.download_button("📥 Exportar Excel", 
+                                     exportar_excel(df_operador_cliente, "Relacion_Cliente_Operador"),
+                                     file_name="cliente_operador.xlsx") 
                 else:
                     st.info("No hay operaciones de efectivo con operador")
         
-        elif tipo_analisis == "16. Explosión de Pitufeo":
+        elif tipo_analisis == "15. Explosión de Pitufeo":
             st.markdown("### 💥 Análisis de Explosión de Pitufeo (Bursts)")
             
             ventana_horas = st.slider("Ventana de tiempo (horas)", 1, 6, 2)
@@ -1054,11 +1418,13 @@ elif menu == "Análisis de Patrones":
                     df_bajo_monto = df_bajo_monto.sort_values('fecha_hora')
                     
                     bursts = []
+                    all_burst_ops = [] # Para el top de glosas
                     
                     for cliente in df_bajo_monto['codunicocli_13_enc'].unique():
-                        df_cliente = df_bajo_monto[df_bajo_monto['codunicocli_13_enc'] == cliente]
+                        df_cliente = df_bajo_monto[df_bajo_monto['codunicocli_13_enc'] == cliente].sort_values('fecha_hora').reset_index(drop=True)
                         
-                        for i in range(len(df_cliente)):
+                        i = 0
+                        while i < len(df_cliente):
                             ventana_inicio = df_cliente.iloc[i]['fecha_hora']
                             ventana_fin = ventana_inicio + pd.Timedelta(hours=ventana_horas)
                             
@@ -1068,20 +1434,61 @@ elif menu == "Análisis de Patrones":
                             ]
                             
                             if len(ops_en_ventana) >= 10:
+                                # Obtener glosas más comunes en esta ráfaga
+                                top_glosas = ops_en_ventana['glosa'].value_counts().head(3).index.tolist()
+                                top_glosas_str = ", ".join([str(g) for g in top_glosas])
+                                
                                 bursts.append({
                                     'cliente': cliente[:8],
                                     'fecha_inicio': ventana_inicio,
                                     'num_operaciones': len(ops_en_ventana),
-                                    'monto_total': ops_en_ventana['monto'].sum()
+                                    'monto_total': ops_en_ventana['monto'].sum(),
+                                    'glosas_frecuentes': top_glosas_str
                                 })
+                                
+                                all_burst_ops.append(ops_en_ventana)
+                                
+                                # Saltar para evitar duplicados: dejar al menos 1 hora de diferencia tras la ventana
+                                min_next_time = ventana_fin + pd.Timedelta(hours=1)
+                                
+                                # Encontrar el índice de la siguiente transacción válida
+                                next_ops = df_cliente[df_cliente['fecha_hora'] > min_next_time]
+                                if not next_ops.empty:
+                                    i = next_ops.index[0]
+                                else:
+                                    break
+                            else:
+                                i += 1
                     
                     if bursts:
-                        df_bursts = pd.DataFrame(bursts).drop_duplicates()
+                        df_bursts = pd.DataFrame(bursts)
                         
-                        st.warning(f"⚠️ Se detectaron {len(df_bursts)} ráfagas de operaciones")
+                        st.warning(f"⚠️ Se detectaron {len(df_bursts)} ráfagas de operaciones (Pitufeo)")
                         st.dataframe(df_bursts.sort_values('num_operaciones', ascending=False), 
                                    use_container_width=True)
                         
+                        # Análisis de Glosas
+                        st.markdown("### 📝 Top Glosas en Operaciones de Pitufeo")
+                        if all_burst_ops:
+                            df_all_ops = pd.concat(all_burst_ops)
+                            df_top_glosas = df_all_ops['glosa'].value_counts().reset_index()
+                            df_top_glosas.columns = ['Glosa', 'Frecuencia']
+                            df_top_glosas = df_top_glosas.head(10)
+                            
+                            col_glosa1, col_glosa2 = st.columns([1, 2])
+                            
+                            with col_glosa1:
+                                st.dataframe(df_top_glosas, use_container_width=True)
+                            
+                            with col_glosa2:
+                                fig_glosa = px.bar(df_top_glosas, x='Frecuencia', y='Glosa',
+                                                 orientation='h',
+                                                 title='Glosas más utilizadas en Pitufeo',
+                                                 color='Frecuencia',
+                                                 color_continuous_scale='Magma')
+                                fig_glosa.update_layout(yaxis={'categoryorder':'total ascending'})
+                                st.plotly_chart(fig_glosa, use_container_width=True)
+
                         df_timeline = df_bajo_monto.copy()
                         #df_timeline['hora_num'] = pd.to_datetime(df_timeline['hora'], format='%H:%M:%S').dt.hour
 
@@ -1103,58 +1510,8 @@ elif menu == "Análisis de Patrones":
                 else:
                     st.info("No hay operaciones de bajo monto")
         
-        elif tipo_analisis == "17. Falso Perfil Geográfico":
-            st.markdown("### 🗺️ Análisis de Falso Perfil Geográfico")
-            
-            if st.button("Analizar"):
-                df_efectivo_agencia = df_caso[
-                    df_caso['grupo'].isin(['RETIRO', 'DEPOSITO'])
-                ].copy()
-                
-                if not df_efectivo_agencia.empty:
-                    df_por_cliente_agencia = df_efectivo_agencia.groupby(
-                        ['codunicocli_13_enc', 'agencia', 'act_economica']
-                    ).agg({
-                        'monto': 'sum',
-                        'id_transaccion': 'count'
-                    }).reset_index()
-                    df_por_cliente_agencia.columns = ['Cliente', 'Agencia', 'Actividad', 
-                                                     'Monto Total', 'Num Ops']
-                    
-                    df_por_cliente_agencia = df_por_cliente_agencia.sort_values(
-                        'Monto Total', ascending=False
-                    )
-                    
-                    st.dataframe(df_por_cliente_agencia.head(30), use_container_width=True)
-                    
-                    fig = px.treemap(df_por_cliente_agencia.head(50),
-                                   path=['Agencia', 'Cliente'],
-                                   values='Monto Total',
-                                   color='Num Ops',
-                                   title='Concentración Geográfica de Efectivo',
-                                   color_continuous_scale='OrRd')
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    agencias_mineras = ['MADRE', 'PUNO', 'JULIACA', 'TACNA', 'TRUJILLO', 'CUSCO']
-                    
-                    df_sospechoso = df_por_cliente_agencia[
-                        df_por_cliente_agencia['Agencia'].str.contains('|'.join(agencias_mineras), 
-                                                                       case=False, na=False)
-                    ]
-                    
-                    if not df_sospechoso.empty:
-                        st.warning(f"⚠️ {len(df_sospechoso)} operaciones en zonas mineras")
-                        st.dataframe(df_sospechoso, use_container_width=True)
-                    
-                    agregar_reporte = st.checkbox("✅ Incluir en reporte PDF")
-                    
-                    st.download_button("📥 Exportar Excel", 
-                                     exportar_excel(df_por_cliente_agencia, "Perfil_Geografico"),
-                                     file_name="perfil_geografico.xlsx")
-                else:
-                    st.info("No hay operaciones de efectivo")
         
-        elif tipo_analisis == "18. Minería de Texto en Glosas":
+        elif tipo_analisis == "16. Minería de Texto en Glosas":
             st.markdown("### 📝 Minería de Texto en Glosas")
             
             palabras_excluir = st.text_input("Palabras a excluir (separadas por coma)", 

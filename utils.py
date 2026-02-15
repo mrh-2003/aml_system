@@ -126,6 +126,16 @@ def obtener_datos_caso(id_caso, conn, filtros=None):
         if filtros.get('fecha_max'):
             query += " AND t.fecha <= ?"
             params.append(filtros['fecha_max']) 
+            
+        if filtros.get('segmento'):
+            if isinstance(filtros['segmento'], list):
+                if filtros['segmento']:
+                    placeholders = ','.join(['?'] * len(filtros['segmento']))
+                    query += f" AND t.segmento IN ({placeholders})"
+                    params.extend(filtros['segmento'])
+            elif filtros['segmento'] != 'AMBOS':
+                query += " AND t.segmento = ?"
+                params.append(filtros['segmento']) 
 
     df = pd.read_sql_query(query, conn, params=params) 
     return df
