@@ -34,7 +34,7 @@ menu = st.sidebar.radio(
 
 if menu == "Inicio":
     st.title("Sistema de Análisis Anti-Lavado de Dinero")
-    st.markdown("### Bienvenido al Sistema de Análisis de la ")
+    st.markdown("### Bienvenido al Sistema de Análisis")
     
     col1, col2, col3 = st.columns(3)
     
@@ -693,6 +693,39 @@ elif menu == "Análisis de Patrones":
                 ]
                 
                 if not df_digital.empty:
+                    # 1. Porcentaje Global
+                    total_global = df_caso['monto'].sum()
+                    total_digital = df_digital['monto'].sum()
+                    pct_global = (total_digital / total_global * 100) if total_global > 0 else 0
+                    
+                    st.metric(
+                        label=f"Participación Global {tipo_billetera} vs Total Operado", 
+                        value=f"{pct_global:.2f}%",
+                        delta=f"S/ {total_digital:,.2f} en digital"
+                    )
+
+                    # 2. Porcentaje por Cuenta
+                    st.markdown("### 📊 Porcentaje de Uso por Cuenta")
+                    
+                    # Total movido por cliente en general
+                    df_total_cli = df_caso.groupby('codunicocli_13_enc')['monto'].sum().reset_index()
+                    df_total_cli.columns = ['Cliente', 'Monto_Total_General']
+                    
+                    # Total movido en billeteras (de lo filtrado)
+                    df_digital_cli = df_digital.groupby('codunicocli_13_enc')['monto'].sum().reset_index()
+                    df_digital_cli.columns = ['Cliente', 'Monto_Digital']
+                    
+                    # Cruzar
+                    df_pct_cli = pd.merge(df_total_cli, df_digital_cli, on='Cliente', how='inner')
+                    df_pct_cli['Porcentaje_Digital'] = (df_pct_cli['Monto_Digital'] / df_pct_cli['Monto_Total_General']) * 100
+                    df_pct_cli = df_pct_cli.sort_values('Porcentaje_Digital', ascending=False)
+                    
+                    st.dataframe(df_pct_cli.head(50).style.format({
+                        'Monto_Total_General': '{:,.2f}',
+                        'Monto_Digital': '{:,.2f}',
+                        'Porcentaje_Digital': '{:.2f}%'
+                    }), use_container_width=True)
+
                     if tipo_billetera == "AMBOS":
                         total_ops = len(df_digital)
                         counts = df_digital['grupo'].value_counts()
@@ -748,9 +781,15 @@ elif menu == "Análisis de Patrones":
                     
                     agregar_reporte = st.checkbox("✅ Incluir en reporte PDF")
                     
-                    st.download_button("📥 Exportar Excel", 
-                                     exportar_excel(df_por_cliente, "Pitufeo_Digital"),
-                                     file_name="pitufeo_digital.xlsx")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.download_button("📥 Exportar Frecuencia", 
+                                         exportar_excel(df_por_cliente, "Pitufeo_Digital"),
+                                         file_name="pitufeo_digital.xlsx")
+                    with col2:
+                        st.download_button("📥 Exportar % Uso", 
+                                         exportar_excel(df_pct_cli, "Porcentaje_Uso_Digital"),
+                                         file_name="porcentaje_uso_digital.xlsx")
                 else:
                     st.info("No se encontraron operaciones de este tipo")
         
@@ -1290,7 +1329,8 @@ elif menu == "Análisis de Patrones":
                     ]
                     
                     if not df_puente.empty:
-                        st.warning(f"⚠️ {len(df_puente)} días con patrón de cuenta puente")
+                        num_clientes_unicos = df_puente['codunicocli_13_enc'].nunique()
+                        st.warning(f"⚠️ {len(df_puente)} días con patrón de cuenta puente detectados en {num_clientes_unicos} clientes únicos")
                          
                         
                         st.dataframe(df_puente.head(20), use_container_width=True)
@@ -1346,7 +1386,14 @@ elif menu == "Análisis de Patrones":
         elif tipo_analisis == "14. Matriz Colusión Cliente-Operador":
             st.markdown("### 🔗 Matriz de Colusión Cliente-Operador")
             
+            # Inicializar estado si no existe
+            if 'analisis_colusion_activo' not in st.session_state:
+                st.session_state.analisis_colusion_activo = False
+
             if st.button("Generar Matriz"):
+                st.session_state.analisis_colusion_activo = True
+
+            if st.session_state.analisis_colusion_activo:
                 df_efectivo = df_caso[
                     (df_caso['grupo'].isin(['RETIRO', 'DEPOSITO', 'DISP EFECTIVO'])) &
                     (df_caso['operador'].notna())
