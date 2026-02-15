@@ -8,7 +8,7 @@ from datetime import datetime, date
 import json
 from utils import *
 
-st.set_page_config(page_title="Sistema AML - UIF", layout="wide", page_icon="🔍")
+st.set_page_config(page_title="Sistema AML", layout="wide", page_icon="🔍")
 
 DB_PATH = 'aml_data.db'
 
@@ -25,7 +25,7 @@ def get_connection():
 
 init_db()
 
-st.sidebar.title("🔍 Sistema AML - UIF")
+st.sidebar.title("🔍 Sistema AML")
 
 menu = st.sidebar.radio(
     "Menú Principal", 
@@ -34,7 +34,7 @@ menu = st.sidebar.radio(
 
 if menu == "Inicio":
     st.title("Sistema de Análisis Anti-Lavado de Dinero")
-    st.markdown("### Bienvenido al Sistema de Análisis de la UIF")
+    st.markdown("### Bienvenido al Sistema de Análisis de la ")
     
     col1, col2, col3 = st.columns(3)
     
