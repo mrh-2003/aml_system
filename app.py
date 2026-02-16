@@ -282,6 +282,7 @@ elif menu == "Análisis de Patrones":
         
         filtro_moneda = st.sidebar.selectbox("Moneda", ["AMBOS", "SOLES", "DOLARES"])
         filtro_tipo_doc = st.sidebar.selectbox("Tipo Documento", ["AMBOS", "DNI", "RUC"])
+        filtro_ie = st.sidebar.selectbox("Tipo Transacción (I/E)", ["AMBOS", "INGRESO", "EGRESO"])
 
         # Obtener segmentos disponibles para el caso
         df_segmentos = pd.read_sql_query("""
@@ -310,6 +311,7 @@ elif menu == "Análisis de Patrones":
         filtros = {
             'moneda': filtro_moneda,
             'tipo_documento': filtro_tipo_doc,
+            'ie': filtro_ie,
             'segmento': filtro_segmento,
             'monto_min': filtro_monto_min,
             'monto_max': filtro_monto_max,

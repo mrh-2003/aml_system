@@ -109,6 +109,12 @@ def obtener_datos_caso(id_caso, conn, filtros=None):
         if filtros.get('tipo_documento') and filtros['tipo_documento'] != 'AMBOS':
             query += " AND t.destipdocumento = ?"
             params.append(filtros['tipo_documento'])
+
+        if filtros.get('ie') and filtros['ie'] != 'AMBOS':
+            # Map UPPERCASE UI selection to Title Case DB values
+            val = filtros['ie'].title() 
+            query += " AND t.i_e = ?"
+            params.append(val)
         
         if filtros.get('monto_min') is not None:
             query += " AND t.monto >= ?"
